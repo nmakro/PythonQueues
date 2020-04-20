@@ -26,4 +26,4 @@ class QueueStats(object):
         print(f"Total customers arrived: {self.get_customers_served()}\n")
         print(f"Worker utilization: {round(100 - 100 * (total_wait / (total_wait + total_work)), 2)}%")
         print(f"Average waiting time per client: {round(avg_waiting_time, 2)}")
-        print("Maximum queue size %d" % self.max_queue_size)
+        print(f"Maximum queue size: {self.max_queue_size}")
