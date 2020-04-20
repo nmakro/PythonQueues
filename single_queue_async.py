@@ -1,6 +1,4 @@
-import gevent
-from gevent import event
-import queue
+import asyncio
 import time
 from random import gauss, randint
 from queue_utils import QueueStats, CONFIG
@@ -12,30 +10,32 @@ class Worker(object):
     def __init__(self):
         self._waiting_time = 0
         self._customers_served = 0
-        self._total_execution_time = 0
+        self._total_working_time = 0
         self._poll_queue_interval = 0.1
         self._execution_time = abs(gauss(CONFIG["execution_mean"], CONFIG["execution_deviation"]))
 
-    def execute_job(self, customers_queue, done, queue_stats):
-        while not done.is_set() or not customers_queue.empty():
+    async def execute_job(self, customers_queue, done, queue_stats):
+        while not done.is_set() or not customers_queue.empty() > 0:
             queue_stats.set_max_queue_size(customers_queue)
             try:
                 customer = customers_queue.get_nowait()
-            except queue.Empty:
-                gevent.sleep(self._poll_queue_interval)
+            except asyncio.queues.QueueEmpty:
+                await asyncio.sleep(self._poll_queue_interval)
                 self._waiting_time += self._poll_queue_interval
                 continue
             self._customers_served += 1
+            customer.set_waiting_time_in_worker(self._execution_time)
             customer.set_time_waited(time.time())
-            gevent.sleep(self._execution_time)
+            await asyncio.sleep(self._execution_time)
             customer.total_waiting_time(self._execution_time)
-            self._total_execution_time += self._execution_time
+            self._total_working_time += self._execution_time
+        customers_queue.task_done()
 
     def get_total_waiting_time(self):
         return self._waiting_time
 
     def get_total_working_time(self):
-        return self._total_execution_time
+        return self._total_working_time
 
     def get_total_customers_served(self):
         return self._customers_served
@@ -61,30 +61,34 @@ class Customer(object):
 
 
 def create_new_customers():
-    return randint(0, 2)
+    customers = randint(0, 2)
+    return customers
 
 
-def insert_new_customer_to_queue(customer_queue, customers, store_closed):
+async def insert_new_customer_to_queue(customers_queue, customers, store_closed):
     global customers_arrived
     counter = 1
+    "Simulate customers entering the store for 6 hours"
     while counter <= 360:
         counter += 1
+        "Every minute some random number of customers between 0 - 3 arrive arrive in the store"
         customers_to_add = create_new_customers()
         customers_arrived += customers_to_add
         for i in range(customers_to_add):
             customer = Customer()
-            customer_queue.put(customer)
+            await customers_queue.put(customer)
             customer.set_time_started_waiting(time.time())
             customers.append(customer)
             customer.set_customer_id(customers.index(customer))
 
-        gevent.sleep(0.1)
+        await asyncio.sleep(0.1)
     store_closed.set()
+    customers_queue.task_done()
 
 
-def work():
-    customer_queue = queue.Queue()
-    done = event.Event()
+async def work():
+    q = asyncio.Queue()
+    done = asyncio.Event()
     customers = []
     workers = []
     jobs = []
@@ -93,21 +97,16 @@ def work():
         worker = Worker()
         workers.append(worker)
 
-    queue_stats = QueueStats(workers, customers)
+    q_stats = QueueStats(workers, customers)
+    for w in workers:
+        jobs.append(w.execute_job(q, done, q_stats))
+    c = insert_new_customer_to_queue(q, customers, done)
+    jobs.append(c)
 
-    for i in range(CONFIG["workers"]):
-        w = gevent.spawn(workers[i].execute_job, customer_queue, done, queue_stats)
-        jobs.append(w)
+    await asyncio.gather(*jobs)
 
-    customer_job = gevent.spawn(insert_new_customer_to_queue, customer_queue, customers, done)
-    jobs.append(customer_job)
-
-    gevent.joinall(
-        jobs
-    )
-
-    queue_stats.report()
+    q_stats.report()
 
 
 if __name__ == '__main__':
-    work()
+    asyncio.run(work())

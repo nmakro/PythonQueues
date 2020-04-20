@@ -2,23 +2,24 @@ import gevent
 from gevent import event
 import queue
 import time
-from random import gauss, randint
+from random import gauss, randint, choice
 from queue_utils import QueueStats, CONFIG
 
+WORKERS_NUM = 8
 customers_arrived = 0
 
 
 class Worker(object):
     def __init__(self):
         self._waiting_time = 0
-        self._customers_served = 0
-        self._total_execution_time = 0
         self._poll_queue_interval = 0.1
+        self._total_execution_time = 0
+        self._customers_served = 0
         self._execution_time = abs(gauss(CONFIG["execution_mean"], CONFIG["execution_deviation"]))
 
-    def execute_job(self, customers_queue, done, queue_stats):
+    def execute_job(self, customers_queue, done, q_stats):
         while not done.is_set() or not customers_queue.empty():
-            queue_stats.set_max_queue_size(customers_queue)
+            q_stats.set_max_queue_size(customers_queue)
             try:
                 customer = customers_queue.get_nowait()
             except queue.Empty:
@@ -26,6 +27,7 @@ class Worker(object):
                 self._waiting_time += self._poll_queue_interval
                 continue
             self._customers_served += 1
+            customer.set_waiting_time_in_worker(self._execution_time)
             customer.set_time_waited(time.time())
             gevent.sleep(self._execution_time)
             customer.total_waiting_time(self._execution_time)
@@ -64,7 +66,7 @@ def create_new_customers():
     return randint(0, 2)
 
 
-def insert_new_customer_to_queue(customer_queue, customers, store_closed):
+def insert_new_customer_to_queue(customer_queue_list, customers, store_closed):
     global customers_arrived
     counter = 1
     while counter <= 360:
@@ -73,7 +75,8 @@ def insert_new_customer_to_queue(customer_queue, customers, store_closed):
         customers_arrived += customers_to_add
         for i in range(customers_to_add):
             customer = Customer()
-            customer_queue.put(customer)
+            min_queue = get_min_queue(customer_queue_list)
+            min_queue.put(customer)
             customer.set_time_started_waiting(time.time())
             customers.append(customer)
             customer.set_customer_id(customers.index(customer))
@@ -82,8 +85,13 @@ def insert_new_customer_to_queue(customer_queue, customers, store_closed):
     store_closed.set()
 
 
+def get_min_queue(queue_list):
+    queue_sizes = [q.qsize() for q in queue_list]
+    return choice([q for q in queue_list if q.qsize() <= min(queue_sizes)])
+
+
 def work():
-    customer_queue = queue.Queue()
+    customer_queue_list = []
     done = event.Event()
     customers = []
     workers = []
@@ -92,15 +100,16 @@ def work():
     for i in range(CONFIG["workers"]):
         worker = Worker()
         workers.append(worker)
+        customer_queue_list.append(queue.Queue())
 
     queue_stats = QueueStats(workers, customers)
 
     for i in range(CONFIG["workers"]):
-        w = gevent.spawn(workers[i].execute_job, customer_queue, done, queue_stats)
+        w = gevent.spawn(workers[i].execute_job, customer_queue_list[i], done, queue_stats)
         jobs.append(w)
 
-    customer_job = gevent.spawn(insert_new_customer_to_queue, customer_queue, customers, done)
-    jobs.append(customer_job)
+    c = gevent.spawn(insert_new_customer_to_queue, customer_queue_list, customers, done)
+    jobs.append(c)
 
     gevent.joinall(
         jobs
